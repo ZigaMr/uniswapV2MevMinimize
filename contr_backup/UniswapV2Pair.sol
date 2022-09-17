@@ -1,12 +1,13 @@
 pragma solidity =0.5.16;
 
-import '@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol';
+import './IUniswapV2Pair.sol';
 import '@uniswap/v2-core/contracts/UniswapV2ERC20.sol';
 import '@uniswap/v2-core/contracts/libraries/Math.sol';
 import '@uniswap/v2-core/contracts/libraries/UQ112x112.sol';
 import '@uniswap/v2-core/contracts/interfaces/IERC20.sol';
 import '@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol';
 import '@uniswap/v2-core/contracts/interfaces/IUniswapV2Callee.sol';
+import "hardhat/console.sol";
 
 contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     using SafeMath  for uint;
@@ -26,6 +27,19 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     uint public price0CumulativeLast;
     uint public price1CumulativeLast;
     uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event
+
+    uint[] private OptAmounts;
+    uint[] private SumToOptAmounts;
+
+    uint public blockNum = 0;
+    uint public pct;
+    uint public start_reserve0;
+    uint public start_reserve1;
+
+    struct SlippageAmounts{
+        uint amountOutMin;
+        uint amountInMax;
+    }
 
     uint private unlocked = 1;
     modifier lock() {
@@ -156,7 +170,8 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     // this low-level function should be called from a contract which performs important safety checks
-    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
+    function swap(uint amount0Out, uint amount1Out, address to) external lock {
+        console.log("Inside swap()");
         require(amount0Out > 0 || amount1Out > 0, 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT');
         (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
         require(amount0Out < _reserve0 && amount1Out < _reserve1, 'UniswapV2: INSUFFICIENT_LIQUIDITY');
@@ -169,7 +184,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         require(to != _token0 && to != _token1, 'UniswapV2: INVALID_TO');
         if (amount0Out > 0) _safeTransfer(_token0, to, amount0Out); // optimistically transfer tokens
         if (amount1Out > 0) _safeTransfer(_token1, to, amount1Out); // optimistically transfer tokens
-        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
+//        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
         balance0 = IERC20(_token0).balanceOf(address(this));
         balance1 = IERC20(_token1).balanceOf(address(this));
         }
@@ -181,15 +196,52 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
         require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
         }
+        {
+            _update(balance0, balance1, _reserve0, _reserve1);
+//            emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+        }
+//        _flagSandwich(_reserve0, _reserve1, amount1Out, amountOutMin, amount0In, balance0, balance1);
 
-        _update(balance0, balance1, _reserve0, _reserve1);
-        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
-        console.log(
-            "Origin: %s",
-            tx.origin
-        );
     }
+    function _flagSandwich(uint _reserve0, uint _reserve1, uint amount1Out, uint amountOutMin, uint amount0In, uint balance0, uint balance1) private {
+        if (blockNum != block.number){
+            delete OptAmounts;
+            delete SumToOptAmounts;
+            blockNum = block.number;
+            start_reserve0 = _reserve0;
+            start_reserve1 = _reserve1;
+        }
 
+        for (uint i=0; i<OptAmounts.length; i++){
+            {
+                pct = (SumToOptAmounts[i]+amount0In) * 1000 / (OptAmounts[i]) - 1000;
+                pct = pct >= 0 ? pct: -pct;
+            }
+            require(pct > 50, "Sandwich attack detected, tx revert!");
+            SumToOptAmounts[i] += amount0In;
+        }
+
+        // Check if tx is targeted (slippage is maximized)
+        if (amount1Out * 1000 / amountOutMin < 1030) {
+            {
+                uint k = start_reserve0 * start_reserve1;
+                OptAmounts.push(_worstReserves(amount0In, amount1Out, k, 997, start_reserve0, start_reserve1, balance0, balance1));
+            }
+            SumToOptAmounts.push(0);
+            start_reserve0 = balance0;
+            start_reserve1 = balance1;
+        }
+    }
+    function _worstReserves(uint amountIn, uint amountOut, uint k, uint fee, uint rIn, uint rOut, uint afterTargetRIn, uint afterTargetROut) public pure returns (uint256){
+        uint negb = (-uint(fee) * uint(amountIn));
+        uint fourac = (uint(40000) * uint(fee) * uint(amountIn) * uint(k))/uint(amountOut);
+        uint squareroot = Math.sqrt((uint(fee)*uint(amountIn))**2 + fourac);
+        uint worstRIn = uint((negb + squareroot)/uint(20000));
+        uint frontrunAmountIn = worstRIn - rIn;
+        uint frontrunAmountOut = (fee*frontrunAmountIn*rOut)/(1000*rIn+fee*frontrunAmountIn);
+        uint backrunAmountOut = (fee*frontrunAmountOut*afterTargetRIn)/(1000*afterTargetROut+fee*frontrunAmountOut);
+        return backrunAmountOut;
+    }
     // force balances to match reserves
     function skim(address to) external lock {
         address _token0 = token0; // gas savings

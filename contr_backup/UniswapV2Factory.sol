@@ -3,7 +3,6 @@
 */
 
 pragma solidity =0.5.16;
-import "hardhat/console.sol";
 
 interface IUniswapV2Factory {
     event PairCreated(address indexed token0, address indexed token1, address pair, uint);
@@ -65,7 +64,7 @@ interface IUniswapV2Pair {
 
     function mint(address to) external returns (uint liquidity);
     function burn(address to) external returns (uint amount0, uint amount1);
-    function swap(uint amount0Out, uint amount1Out, address to, uint amountOutMin) external;
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;
     function skim(address to) external;
     function sync() external;
 
@@ -223,14 +222,6 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     uint public price1CumulativeLast;
     uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event
 
-    uint[] public OptAmounts;
-    uint[] public SumToOptAmounts;
-
-    uint public blockNum = 0;
-    int public pct;
-    uint public start_reserve0;
-    uint public start_reserve1;
-
     uint private unlocked = 1;
     modifier lock() {
         require(unlocked == 1, 'UniswapV2: LOCKED');
@@ -360,93 +351,36 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     // this low-level function should be called from a contract which performs important safety checks
-    function swap(uint amount0Out, uint amount1Out, address to, uint amountOutMin) external lock {
-        console.log("Inside swap()");
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
         require(amount0Out > 0 || amount1Out > 0, 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT');
         (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
         require(amount0Out < _reserve0 && amount1Out < _reserve1, 'UniswapV2: INSUFFICIENT_LIQUIDITY');
-        console.log("Amount checks");
+
         uint balance0;
         uint balance1;
         { // scope for _token{0,1}, avoids stack too deep errors
-            address _token0 = token0;
-            address _token1 = token1;
-            require(to != _token0 && to != _token1, 'UniswapV2: INVALID_TO');
-            if (amount0Out > 0) _safeTransfer(_token0, to, amount0Out); // optimistically transfer tokens
-            if (amount1Out > 0) _safeTransfer(_token1, to, amount1Out); // optimistically transfer tokens
-    //        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
-            balance0 = IERC20(_token0).balanceOf(address(this));
-            balance1 = IERC20(_token1).balanceOf(address(this));
-            console.log("Token checks");
+        address _token0 = token0;
+        address _token1 = token1;
+        require(to != _token0 && to != _token1, 'UniswapV2: INVALID_TO');
+        if (amount0Out > 0) _safeTransfer(_token0, to, amount0Out); // optimistically transfer tokens
+        if (amount1Out > 0) _safeTransfer(_token1, to, amount1Out); // optimistically transfer tokens
+        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
+        balance0 = IERC20(_token0).balanceOf(address(this));
+        balance1 = IERC20(_token1).balanceOf(address(this));
         }
         uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
         uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
         require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
-        console.log("Insufficient amounts check");
         { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
-            uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
-            uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
-            console.log("A: %s B: %s", balance0Adjusted.mul(balance1Adjusted), uint(_reserve0).mul(_reserve1).mul(1000**2));
-            require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
+        uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
+        uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
+        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
         }
-        {
-            _update(balance0, balance1, _reserve0, _reserve1);
-//            emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
-        }
-        console.log("Checking for sandwich");
-        _flagSandwich(_reserve0, _reserve1, amount1Out, amount0Out, amountOutMin, amount0In, balance0, balance1);
 
+        _update(balance0, balance1, _reserve0, _reserve1);
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
-    function _flagSandwich(uint _reserve0, uint _reserve1, uint amount1Out, uint amount0Out, uint amountOutMin, uint amount0In, uint balance0, uint balance1) private {
-        console.log("Flag sandwich");
-        if (blockNum != block.number){
-            delete OptAmounts;
-            delete SumToOptAmounts;
-            blockNum = block.number;
-            start_reserve0 = _reserve0;
-            start_reserve1 = _reserve1;
 
-        }
-        console.log("blockNum: %s", blockNum);
-        console.log("Check Opt Amounts");
-        for (uint i=0; i<OptAmounts.length; i++){
-            SumToOptAmounts[i] += amount0Out;
-            console.log("OptAmounts: %s", OptAmounts[i]);
-            console.log("SumOptAmounts: %s", SumToOptAmounts[i]);
-            pct = int(SumToOptAmounts[i] * 1000 / OptAmounts[i]) - 1000;
-            pct = pct >= 0 ? pct: -pct;
-//            console.log("Pct: %s", pct);
-            require(pct > 50, "Sandwich attack detected, tx revert!");
-        }
-        console.log("Check if slippage minimized");
-        console.log("AmountOutMin: %s Amount1Out: %s", amountOutMin, amount1Out);
-        // Check if tx is targeted (slippage is maximized)
-        if ((amountOutMin > 0) && (amount1Out * 1000 / amountOutMin < 1030)) {
-
-            uint k = start_reserve0 * start_reserve1;
-            uint w = _worstReserves(amount0In, amount1Out, k, 997, start_reserve0, start_reserve1, balance0, balance1);
-            OptAmounts.push(w);
-            SumToOptAmounts.push(0);
-            start_reserve0 = balance0;
-            start_reserve1 = balance1;
-            console.log("w: %s, SumToOptAmounts: %s", w, SumToOptAmounts[0]);
-        }
-    }
-    function _worstReserves(uint amountIn, uint amountOut, uint k, uint fee, uint rIn, uint rOut, uint afterTargetRIn, uint afterTargetROut) public view returns (uint256){
-        uint negb = (uint(fee) * uint(amountIn));
-        uint fourac = (uint(4000) * uint(fee) * uint(amountIn) * uint(k))/uint(amountOut);
-        uint squareroot = Math.sqrt(negb**2 + fourac);
-        uint worstRIn = uint((squareroot-negb)/uint(2000));
-        uint frontrunAmountIn = worstRIn - rIn;
-        console.log(negb, fourac, squareroot);
-        console.log("worstRIn: %s, rIn: %s", worstRIn, rIn);
-        console.log("amountIn: %s, amountOut: %s, k: %s", amountIn, amountOut, k);
-        console.log("rOut: %s, afterTargetRIn: %s, afterTargetROut: %s", rOut, afterTargetRIn, afterTargetROut);
-        uint frontrunAmountOut = (fee*frontrunAmountIn*rOut)/(1000*rIn+fee*frontrunAmountIn);
-        uint backrunAmountOut = (fee*frontrunAmountOut*afterTargetRIn)/(1000*afterTargetROut+fee*frontrunAmountOut);
-        console.log("Frontrun amount in %s, backrun amount out %s", frontrunAmountIn, backrunAmountOut);
-        return backrunAmountOut;
-    }
     // force balances to match reserves
     function skim(address to) external lock {
         address _token0 = token0; // gas savings
