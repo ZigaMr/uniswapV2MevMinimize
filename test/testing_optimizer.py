@@ -21,7 +21,7 @@ def binary_search(target_eth, token_pool, weth_pool, out_min, error_margin, uppe
         my_eth, profit_eth, target_tokens = calculate_frontrun_return(mid * 10 ** 18, target_eth,
                                                                       token_pool, weth_pool, False, pct=pct)
         if abs(upper - lower) * 10 ** 18 < error_margin:
-            print(upper)
+            # print(upper)
             if target_tokens < out_min:
                 return calculate_frontrun_return(lower * 10 ** 18, target_eth, token_pool, weth_pool, False, pct=pct)
             else:
@@ -32,10 +32,6 @@ def binary_search(target_eth, token_pool, weth_pool, out_min, error_margin, uppe
         else:
             return binary_search(target_eth, token_pool, weth_pool, out_min, error_margin, upper, mid, pct=pct)
     return False
-
-
-def optimal_bid(r0, vx):
-    return -(1000 / 997) * r0 + 997000 / 5991 * vx + 10 / 5991 * (-179730 * r0 * vx + 9999820270 * vx ** 2) ** (0.5)
 
 def optimal_bid2(aIn, k, aOut):
     return (-997*aIn + math.sqrt((997*aIn)**2 - 4000*(-997*k*aIn/aOut)))/2000

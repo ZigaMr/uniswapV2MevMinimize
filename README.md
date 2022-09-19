@@ -148,21 +148,58 @@ The amountOutMin is then passed as a separate uint parameter inside _swap() to t
 ```
 
 # Disclaimer: 
-For academic purposes only. This version is still unstable, it only supports UniswapV2Router02.swapExactTokensForTokens() swaps and has not been tested for edge cases.
+For academic purposes only, sandwiching is unethical and most likely will be made illegal in the future. This version is still unstable, it only supports UniswapV2Router02.swapExactTokensForTokens() swaps and has not been tested for edge cases.
 This project also does not prevent sandwich attacks entirely since the attacker can split the amounts among multiple tx across multiple blocks.
 It was aimed at preventing flashbots style attacks where all txs must pass without reverts. In PGA(price gas auctions) the target will still lose it's slippage amount, since the frontrun tx lands onchain, but the backrun will revert. 
 This mechanism would in theory discourage any rational bot operator from running the same attack further.   
 
 ### Environment setup and example
 We use python with poetry/pyenv for test/deploy and hardhat for EVM network simulation.
-- Install pyenv and poetry. 
+Please use a linux base OS:
+- Clone the repository
+- Install pyenv and poetry (Or any other python env manager - make sure you use python 3.8.0)
+- cd inside the uniswapV2MevMinimize folder and run `poetry install` (or just install web3 package, if using other env managers - see pyproject.toml)
+- Initialize node project, type `npm init` and then install hardhat `npm install --save-dev hardhat`
+- Run `npx hardhat` and select "Create an empty hardhat.config.js"
+- Copy the contents of hardhat.config_template.js into hardhat.config.js file
+- Run `npx hardhat compile && npx hardhat node` to start the node
+- Activate your environment (`poetry shell`) and run `cd test && python PoolTest.py`
 
+PoolTest.py contains all the off-chain logic to simulate a sandwich attack.
+First it deploys all the necessary UniswapV2 contracts, then creates 2 new erc20 tokens and the UniswapV2Pair **Pool**.
+It then loads the Attacker Wallet, Target Wallet and Pool with some amount of tokens.
 
+The **Pool** contract now contains 50 of each token. Target address tries to exchange 20 base tokens for a minimum Output amount of 10 quote tokens.
+
+In a fair system the target would receive almost the same amount (~19.5 quote tokens, according to constant product formula + fees),
+however because of the frontrun tx it only receives ~ 10.01 tokens. 
+```shell
+Attacker base amount before:  500.0
+Attacker quote amount before:  0.0
+Target base amount before:  100.0
+Target quote amount before:  0.0
+
+Attacker base amount after:  488.67966311659546
+Attacker quote amount after:  0.0
+Target base amount after:  80.0
+Target quote amount after:  10.009735547540197
+```
+
+Good news is that the Attacker did not receive any base tokens back, 
+since the backrun tx was reverted. What is immediately noticable is that the attacker doesn't appear to have any quote tokens left.
+This is because frontrun and backrun tx do not go through the Router contract, but are rather made up of 2 parts - the transfer (to the **Pool**) and the swap().
+In this case the transfer call did go through, so the Attacker transferred the entire quote tokens amount but the swap reverted, trapping the transferred amount in the **Pool** contract.
+
+We can also make sure that the backrun did indeed revert by checking the hardhat logs:
 
 ```shell
-npx hardhat help
-npx hardhat test
-GAS_REPORT=true npx hardhat test
-npx hardhat node
-npx hardhat run scripts/deploy.js
+Error: VM Exception while processing transaction: reverted with reason string 'Sandwich attack detected, tx revert!'
+            at UniswapV2Pair._flagSandwich (contracts/UniswapV2Factory.sol:421)
+            at processTicksAndRejections (node:internal/process/task_queues:96:5)
+
 ```
+
+TODO: 
+- Fix the UniswapV2Router02._swap() code to work with all UniswapV2Router02.swap** functions.
+- Add Uniswap UI
+- Better detection logic - right now the mechanism will detect a high amount of false positives, reverting normal non MEV transactions. This can severely impact the UX, so adjustments have to be made.
