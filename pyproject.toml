@@ -8,6 +8,7 @@ authors = ["ZigaMr <ziga.mrzljak93@gmail.com>"]
 python = "^3.8"
 pandas = "^1.4.4"
 matplotlib = "^3.5.3"
+web3 = "^5.30.0"
 
 [tool.poetry.dev-dependencies]
 
